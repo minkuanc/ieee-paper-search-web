@@ -1,19 +1,9 @@
 import asyncio
-import json
-import os
-import re
-import threading
 import time
-import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
-
-from scraper import PDFDownloader, search_papers
-from excel_writer import ExcelWriter
 
 # ── job store ─────────────────────────────────────────────────────────────────
 jobs: dict[str, dict] = {}
