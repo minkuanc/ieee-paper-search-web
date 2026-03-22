@@ -1,3 +1,4 @@
+import tempfile
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -32,3 +33,23 @@ def test_search_returns_papers():
 def test_search_empty_keywords_returns_400():
     r = client.post("/api/search", json={"keywords": [], "years_back": 3})
     assert r.status_code == 400
+
+def test_download_nonexistent_folder_returns_400():
+    r = client.post("/api/download", json={
+        "papers": [{"title": "P", "year": 2024, "authors": "", "venue": "", "doi": "x", "url": "http://x", "pdf_link": ""}],
+        "dest_folder": "/nonexistent/path/xyz",
+        "keywords": ["deep learning"]
+    })
+    assert r.status_code == 400
+    assert "does not exist" in r.json()["detail"]
+
+def test_download_valid_folder_returns_job_id():
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch("main.threading.Thread"):  # don't actually start download
+            r = client.post("/api/download", json={
+                "papers": [{"title": "P", "year": 2024, "authors": "", "venue": "", "doi": "x", "url": "http://x", "pdf_link": ""}],
+                "dest_folder": tmp,
+                "keywords": ["deep learning"]
+            })
+    assert r.status_code == 200
+    assert "job_id" in r.json()
