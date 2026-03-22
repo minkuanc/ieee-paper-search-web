@@ -2,8 +2,11 @@ import asyncio
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from scraper import search_papers
 
 # ── job store ─────────────────────────────────────────────────────────────────
 jobs: dict[str, dict] = {}
@@ -36,6 +39,20 @@ app.add_middleware(
 )
 
 
+class SearchRequest(BaseModel):
+    keywords: list[str]
+    years_back: int = 3
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.post("/api/search")
+def api_search(req: SearchRequest):
+    kws = [k.strip() for k in req.keywords if k.strip()]
+    if not kws:
+        raise HTTPException(status_code=400, detail="At least one keyword is required")
+    papers, truncated, total = search_papers(kws, req.years_back)
+    return {"papers": papers, "truncated": truncated, "total": total}
