@@ -98,7 +98,7 @@ def _run_download(job_id: str, loop: asyncio.AbstractEventLoop):
                 "title": paper["title"],
                 "status": status,
                 "local_path": local_path,
-                "done": idx == total - 1,
+                "done": False,
             }
             job["results"].append(event)
             loop.call_soon_threadsafe(job["queue"].put_nowait, event)
@@ -106,11 +106,14 @@ def _run_download(job_id: str, loop: asyncio.AbstractEventLoop):
         excel_path = os.path.join(job["root"], "papers.xlsx")
         writer = ExcelWriter(excel_path)
         writer.append_papers([
-            {**jobs[job_id]["papers"][i], "local_path": e["local_path"], "status": e["status"]}
+            {**job["papers"][i], "local_path": e["local_path"], "status": e["status"]}
             for i, e in enumerate(job["results"])
         ])
         writer.save()
         job["excel_path"] = excel_path
+        terminal_event = {"index": total, "total": total, "title": "", "status": "Done", "local_path": "", "done": True}
+        job["results"].append(terminal_event)
+        loop.call_soon_threadsafe(job["queue"].put_nowait, terminal_event)
     finally:
         job["done"] = True
         downloader.close()
@@ -124,11 +127,13 @@ async def api_download(req: DownloadRequest):
         raise HTTPException(status_code=400, detail="Destination folder is not writable")
 
     root_name = "_".join(_sanitize_folder_name(k) for k in req.keywords if k.strip())
+    if not root_name:
+        raise HTTPException(status_code=400, detail="At least one keyword is required")
     root = os.path.join(req.dest_folder, root_name)
     os.makedirs(root, exist_ok=True)
 
     job_id = str(uuid.uuid4())
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     jobs[job_id] = {
         "papers": [p.model_dump() for p in req.papers],
         "root": root,
