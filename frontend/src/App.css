@@ -41,9 +41,9 @@ h1 { color: #00539b; margin-bottom: 20px; }
 
 .download-section { background: white; border-radius: 8px; padding: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
 
-.download-row { display: flex; gap: 8px; margin-bottom: 8px; }
+.download-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 
-.folder-input { flex: 1; border: 1px solid #ccc; border-radius: 4px; padding: 6px 10px; font-size: 14px; }
+.folder-display { flex: 1; font-size: 13px; color: #555; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .error-msg { color: #c0392b; font-size: 13px; margin-top: 6px; }
 

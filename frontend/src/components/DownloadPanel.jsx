@@ -1,24 +1,37 @@
 import { useState } from 'react'
 
 export default function DownloadPanel({ selectedPapers, keywords }) {
-  const [destFolder, setDestFolder] = useState('')
   const [error, setError] = useState('')
   const [progress, setProgress] = useState(null)
   const [jobId, setJobId] = useState(null)
   const [summary, setSummary] = useState(null)
   const [downloading, setDownloading] = useState(false)
+  const [destFolder, setDestFolder] = useState('')
 
   async function handleDownload() {
     setError('')
     setSummary(null)
     setProgress(null)
 
+    // Step 1: open native folder picker
+    let folderRes
+    try {
+      folderRes = await fetch('/api/choose-folder')
+    } catch {
+      setError('Network error — is the backend running?')
+      return
+    }
+    if (!folderRes.ok) return  // user cancelled (204)
+    const { path } = await folderRes.json()
+    setDestFolder(path)
+
+    // Step 2: start download job
     let res
     try {
       res = await fetch('/api/download', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ papers: selectedPapers, dest_folder: destFolder, keywords }),
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ papers: selectedPapers, dest_folder: path, keywords }),
       })
     } catch {
       setError('Network error — is the backend running?')
@@ -35,10 +48,11 @@ export default function DownloadPanel({ selectedPapers, keywords }) {
     setJobId(job_id)
     setDownloading(true)
 
+    // Step 3: stream SSE progress
     const es = new EventSource(`/api/download/${job_id}/progress`)
     es.onmessage = e => {
       const event = JSON.parse(e.data)
-      setProgress(event)
+      if (!event.done) setProgress(event)
       if (event.done) {
         es.close()
         setDownloading(false)
@@ -51,27 +65,12 @@ export default function DownloadPanel({ selectedPapers, keywords }) {
     es.onerror = () => { es.close(); setDownloading(false) }
   }
 
-  async function handleBrowse() {
-    const res = await fetch('/api/choose-folder')
-    if (res.ok) {
-      const data = await res.json()
-      setDestFolder(data.path)
-    }
-  }
-
-  const canDownload = selectedPapers.length > 0 && destFolder.trim() && !downloading
+  const canDownload = selectedPapers.length > 0 && !downloading
 
   return (
     <div className="download-section">
       <div className="download-row">
-        <input
-          type="text"
-          value={destFolder}
-          onChange={e => setDestFolder(e.target.value)}
-          placeholder="/Users/you/Downloads"
-          className="folder-input"
-        />
-        <button onClick={handleBrowse} disabled={downloading} className="btn-secondary">Browse…</button>
+        {destFolder && <span className="folder-display">{destFolder}</span>}
         <button onClick={handleDownload} disabled={!canDownload} className="btn-primary">
           {downloading ? 'Downloading…' : `Download Selected (${selectedPapers.length})`}
         </button>
@@ -79,11 +78,17 @@ export default function DownloadPanel({ selectedPapers, keywords }) {
 
       {error && <div className="error-msg">⚠ {error}</div>}
 
-      {progress && (
+      {(downloading || progress) && (
         <div className="progress-section">
-          <progress value={progress.index} max={progress.total} className="progress-bar" />
+          <progress
+            value={progress ? progress.index : 0}
+            max={progress ? progress.total : selectedPapers.length}
+            className="progress-bar"
+          />
           <div className="progress-label">
-            {progress.index} / {progress.total} — {progress.title.slice(0, 60)}{progress.title.length > 60 ? '…' : ''}
+            {progress
+              ? `${progress.index} / ${progress.total} — ${progress.title.slice(0, 70)}${progress.title.length > 70 ? '…' : ''}`
+              : 'Starting download…'}
           </div>
         </div>
       )}
