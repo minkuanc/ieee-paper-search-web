@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import KeywordInput from './components/KeywordInput'
+import ResultsTable from './components/ResultsTable'
 import './App.css'
 
 export default function App() {
@@ -33,7 +34,13 @@ export default function App() {
     <div className="app">
       <h1>IEEE Paper Search</h1>
       <KeywordInput onSearch={handleSearch} loading={loading} />
-      <p>{papers.length} papers loaded</p>
+      <ResultsTable
+        papers={papers}
+        truncated={truncated}
+        total={total}
+        selectedIndices={selectedIndices}
+        setSelectedIndices={setSelectedIndices}
+      />
     </div>
   )
 }

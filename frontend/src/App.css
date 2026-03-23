@@ -17,3 +17,22 @@ h1 { color: #00539b; margin-bottom: 20px; }
 .btn-primary { background: #00539b; color: white; border: none; border-radius: 4px; padding: 8px 20px; cursor: pointer; font-size: 14px; }
 .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
 .btn-secondary { background: white; color: #00539b; border: 1px solid #00539b; border-radius: 4px; padding: 8px 14px; cursor: pointer; font-size: 14px; }
+
+.results-section { background: white; border-radius: 8px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+
+.truncation-banner { background: #fff9c4; border: 1px solid #f0c040; border-radius: 4px; padding: 8px 12px; margin-bottom: 12px; font-size: 13px; }
+
+.results-controls { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+
+.results-count { font-size: 13px; color: #555; }
+
+.table-wrap { overflow-x: auto; max-height: 420px; overflow-y: auto; }
+
+.results-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+
+.results-table th { background: #00539b; color: white; padding: 8px; text-align: left; position: sticky; top: 0; }
+
+.results-table td { padding: 7px 8px; border-bottom: 1px solid #eee; cursor: pointer; }
+
+.results-table tr:hover td { background: #f0f6ff; }
+.results-table tr.selected td { background: #dceeff; }
