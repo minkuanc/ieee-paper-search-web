@@ -39,6 +39,7 @@ export default function App() {
     <div className="app">
       <h1>IEEE Paper Search</h1>
       <KeywordInput onSearch={handleSearch} loading={loading} />
+      {loading && <div className="searching-msg">Searching IEEE Xplore… this may take 10–20 seconds.</div>}
       <ResultsTable
         papers={papers}
         truncated={truncated}

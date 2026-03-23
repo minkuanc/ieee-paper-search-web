@@ -18,6 +18,8 @@ h1 { color: #00539b; margin-bottom: 20px; }
 .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
 .btn-secondary { background: white; color: #00539b; border: 1px solid #00539b; border-radius: 4px; padding: 8px 14px; cursor: pointer; font-size: 14px; }
 
+.searching-msg { background: #e8f0fe; border: 1px solid #aac4f0; border-radius: 4px; padding: 10px 14px; margin-bottom: 12px; font-size: 13px; color: #1a4a8a; }
+
 .results-section { background: white; border-radius: 8px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
 
 .truncation-banner { background: #fff9c4; border: 1px solid #f0c040; border-radius: 4px; padding: 8px 12px; margin-bottom: 12px; font-size: 13px; }
