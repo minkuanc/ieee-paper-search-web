@@ -22,9 +22,29 @@ h1 { color: #00539b; margin-bottom: 20px; }
 
 .results-section { background: white; border-radius: 8px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
 
-.truncation-banner { background: #fff9c4; border: 1px solid #f0c040; border-radius: 4px; padding: 8px 12px; margin-bottom: 12px; font-size: 13px; }
+.search-stats {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #f0f6ff;
+  border: 1px solid #c0d8f0;
+  border-radius: 6px;
+  padding: 10px 16px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
 
-.results-controls { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.stat-item { display: flex; align-items: baseline; gap: 6px; }
+
+.stat-label { font-size: 12px; color: #555; text-transform: uppercase; letter-spacing: .04em; }
+
+.stat-value { font-size: 22px; font-weight: 700; color: #00539b; line-height: 1; }
+
+.stat-divider { color: #aaa; font-size: 18px; }
+
+.stat-cap { font-size: 12px; color: #b07000; background: #fff9c4; border: 1px solid #f0c040; border-radius: 3px; padding: 1px 6px; margin-left: 4px; }
+
+.results-controls { display: flex; justify-content: flex-end; align-items: center; margin-bottom: 8px; }
 
 .results-count { font-size: 13px; color: #555; }
 
@@ -57,3 +77,6 @@ h1 { color: #00539b; margin-bottom: 20px; }
 
 .excel-link { color: #00539b; font-weight: bold; text-decoration: none; }
 .excel-link:hover { text-decoration: underline; }
+
+.kw-cell { font-size: 11px; color: #444; }
+.kw-none { color: #bbb; }

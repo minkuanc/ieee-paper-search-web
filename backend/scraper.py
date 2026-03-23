@@ -9,6 +9,7 @@ IEEE Xplore scraper.
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -53,19 +54,86 @@ def _make_session() -> requests.Session:
     return session
 
 
+def _fetch_keywords(article_number: str | int, session: requests.Session) -> list[str]:
+    """
+    Fetch IEEE Keywords, Author Keywords, and Index Terms for a single paper
+    from the per-document REST endpoint.  Returns a flat list of original-case
+    strings, or [] on any error.
+    """
+    url = f"{BASE_URL}/rest/document/{article_number}/keywords"
+    try:
+        resp = session.get(
+            url,
+            headers={"Accept": "application/json",
+                     "Referer": "https://ieeexplore.ieee.org/"},
+            timeout=15,
+        )
+        if not resp.ok:
+            return []
+        data = resp.json()
+    except Exception:
+        return []
+
+    kws: list[str] = []
+    for group in data.get("keywords", []):
+        for term in group.get("kwd", []):
+            if isinstance(term, str) and term.strip():
+                kws.append(term.strip())
+    return kws
+
+
+def _paper_matches(title: str, ieee_keywords: list[str], input_keywords: list[str]) -> bool:
+    """
+    Return True if every input keyword appears in the paper title OR in the
+    fetched IEEE / author keyword list.  Matching is case-insensitive and
+    substring-based ("MIMO" matches "Massive MIMO", etc.).
+    """
+    title_lower = title.lower()
+    kw_blobs = [k.lower() for k in ieee_keywords]
+
+    for kw in input_keywords:
+        kw_lower = kw.strip().lower()
+        if not kw_lower:
+            continue
+        if kw_lower in title_lower:
+            continue
+        if any(kw_lower in blob for blob in kw_blobs):
+            continue
+        return False
+    return True
+
+
 def search_papers(keywords: list[str], years_back: int = 3) -> list[dict]:
     """
-    Search IEEE Xplore for papers matching all keywords published in the
-    last `years_back` calendar years.
+    Search IEEE Xplore for papers where every keyword appears in either
+    the paper title OR the IEEE/author keyword list.
 
-    Returns (papers, truncated, total) where papers is a list of dicts:
-      {title, year, authors, venue, doi, url}
-    sorted by year descending.  Capped at MAX_RESULTS (200).
+    Strategy:
+      1. Ask IEEE with a field-scoped query (Document Title + Author Keywords).
+      2. Collect all matching records (up to MAX_RESULTS).
+      3. Fetch the full keyword lists in parallel from the per-document endpoint.
+      4. Post-filter using fetched keywords + title (second-pass verification).
+
+    Returns (papers, truncated, total) where:
+      - total      = totalRecords reported by IEEE for the scoped query
+      - truncated  = True when the capped list < full IEEE result set
+      - papers     = verified list with ieee_keywords populated, sorted by year
     """
     current_year = datetime.now().year
     start_year = current_year - years_back
-    query_text = " AND ".join(k.strip() for k in keywords if k.strip())
     year_range = f"{start_year}_{current_year}_Year"
+
+    # Field-scoped query: every keyword must appear in title OR author keywords
+    kw_clauses = []
+    for kw in keywords:
+        kw = kw.strip()
+        if not kw:
+            continue
+        quoted = kw.replace('"', '')
+        kw_clauses.append(
+            f'(("Document Title":"{quoted}") OR ("Author Keywords":"{quoted}"))'
+        )
+    query_text = " AND ".join(kw_clauses) if kw_clauses else ""
 
     session = _make_session()
     search_headers = {
@@ -76,8 +144,10 @@ def search_papers(keywords: list[str], years_back: int = 3) -> list[dict]:
         "X-Requested-With": "XMLHttpRequest",
     }
 
-    papers = []
+    # ── Step 1: collect raw records from paginated search ────────────────────
+    raw_papers = []
     page = 1
+    total = 0
 
     while True:
         payload = {
@@ -117,25 +187,58 @@ def search_papers(keywords: list[str], years_back: int = 3) -> list[dict]:
             doc_link = record.get("documentLink", "")
             url = BASE_URL + doc_link if doc_link.startswith("/") else doc_link
 
-            papers.append(
-                {
-                    "title": record.get("articleTitle", "Unknown Title"),
-                    "year": int(record.get("publicationYear", 0)),
-                    "authors": authors_str,
-                    "venue": record.get("publicationTitle", record.get("displayPublicationTitle", "")),
-                    "doi": record.get("doi", ""),
-                    "url": url,
-                    "pdf_link": record.get("pdfLink", ""),
-                }
-            )
+            raw_papers.append({
+                "article_number": str(record.get("articleNumber", "")),
+                "title": record.get("articleTitle", "Unknown Title"),
+                "year": int(record.get("publicationYear", 0)),
+                "authors": authors_str,
+                "venue": record.get("publicationTitle", record.get("displayPublicationTitle", "")),
+                "doi": record.get("doi", ""),
+                "url": url,
+                "pdf_link": record.get("pdfLink", ""),
+            })
 
-        if len(papers) >= MAX_RESULTS or len(papers) >= total:
+            if len(raw_papers) >= MAX_RESULTS:
+                break
+
+        if len(raw_papers) >= MAX_RESULTS or len(raw_papers) >= total or not records:
             break
 
         page += 1
 
+    # ── Step 2: fetch full keyword lists in parallel ──────────────────────────
+    kw_map: dict[str, list[str]] = {}   # article_number → keyword list
+
+    def _fetch(art_num: str) -> tuple[str, list[str]]:
+        return art_num, _fetch_keywords(art_num, session)
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(_fetch, p["article_number"]): p["article_number"]
+                   for p in raw_papers if p["article_number"]}
+        for fut in as_completed(futures):
+            art_num, kws = fut.result()
+            kw_map[art_num] = kws
+
+    # ── Step 3: post-filter and assemble final list ───────────────────────────
+    papers = []
+    for p in raw_papers:
+        ieee_kws = kw_map.get(p["article_number"], [])
+        # Keep paper only if every input keyword is in title OR fetched keywords
+        if not _paper_matches(p["title"], ieee_kws, keywords):
+            continue
+        papers.append({
+            "title": p["title"],
+            "year": p["year"],
+            "authors": p["authors"],
+            "venue": p["venue"],
+            "doi": p["doi"],
+            "url": p["url"],
+            "pdf_link": p["pdf_link"],
+            "ieee_keywords": ieee_kws,
+        })
+
     papers.sort(key=lambda p: p["year"], reverse=True)
-    truncated = len(papers) >= MAX_RESULTS and total > MAX_RESULTS
+    truncated = len(raw_papers) >= MAX_RESULTS and total > MAX_RESULTS
     return papers, truncated, total
 
 
@@ -151,18 +254,53 @@ class PDFDownloader:
             Path.home() / ".ieee_search_app" / "chrome_profile"
         )
 
+    @staticmethod
+    def _chrome_major_version() -> int | None:
+        """Return the installed Chrome major version number, or None if unknown."""
+        import subprocess, re
+        candidates = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium-browser",
+        ]
+        for exe in candidates:
+            try:
+                out = subprocess.check_output([exe, "--version"],
+                                              stderr=subprocess.DEVNULL, text=True)
+                m = re.search(r"(\d+)\.\d+\.\d+", out)
+                if m:
+                    return int(m.group(1))
+            except Exception:
+                continue
+        return None
+
     def _ensure_driver(self):
         if self._driver is not None:
             return
         import undetected_chromedriver as uc
 
         os.makedirs(self._user_data_dir, exist_ok=True)
+        # Remove stale Chrome singleton locks left by previous crashes.
+        # If these exist Chrome will refuse to start with this profile.
+        for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+            lock_path = os.path.join(self._user_data_dir, lock)
+            try:
+                os.remove(lock_path)
+            except FileNotFoundError:
+                pass
         options = uc.ChromeOptions()
         options.add_argument(f"--user-data-dir={self._user_data_dir}")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
+        # Detect Chrome version so uc downloads the matching chromedriver
+        version_main = self._chrome_major_version()
         # non-headless so user can log in on first run
-        self._driver = uc.Chrome(options=options, headless=False)
+        self._driver = uc.Chrome(
+            options=options,
+            headless=False,
+            **({"version_main": version_main} if version_main else {}),
+        )
 
     def download(self, paper: dict, dest_folder: str) -> tuple[str, str]:
         """
@@ -179,6 +317,17 @@ class PDFDownloader:
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support.ui import WebDriverWait
         from selenium.webdriver.support import expected_conditions as EC
+
+        # If the previous Chrome session died (e.g. user closed window), reset it.
+        if self._driver is not None:
+            try:
+                _ = self._driver.current_url  # cheap liveness check
+            except Exception:
+                try:
+                    self._driver.quit()
+                except Exception:
+                    pass
+                self._driver = None
 
         self._ensure_driver()
         driver = self._driver

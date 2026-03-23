@@ -59,15 +59,31 @@ def health():
 
 @app.get("/api/choose-folder")
 def choose_folder():
-    import tkinter as tk
-    from tkinter import filedialog
-    root = tk.Tk()
-    root.withdraw()
-    root.wm_attributes("-topmost", 1)
-    folder = filedialog.askdirectory(title="Select destination folder")
-    root.destroy()
+    """Open a native macOS folder picker.
+    Tkinter must run on the main thread; we spawn a subprocess so it gets one.
+    Returns {"path": "<folder>"} or {"path": null, "cancelled": true}.
+    """
+    import subprocess, sys
+    script = (
+        "import tkinter as tk\n"
+        "from tkinter import filedialog\n"
+        "root = tk.Tk()\n"
+        "root.withdraw()\n"
+        "root.wm_attributes('-topmost', 1)\n"
+        "folder = filedialog.askdirectory(title='Select destination folder')\n"
+        "root.destroy()\n"
+        "print(folder)\n"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, timeout=120,
+        )
+        folder = result.stdout.strip()
+    except subprocess.TimeoutExpired:
+        folder = ""
     if not folder:
-        raise HTTPException(status_code=204, detail="No folder selected")
+        return {"path": None, "cancelled": True}
     return {"path": folder}
 
 
@@ -88,6 +104,7 @@ class PaperItem(BaseModel):
     doi: str
     url: str
     pdf_link: str = ""
+    ieee_keywords: list[str] = []
 
 
 class DownloadRequest(BaseModel):

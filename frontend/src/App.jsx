@@ -6,6 +6,7 @@ import './App.css'
 
 export default function App() {
   const [loading, setLoading] = useState(false)
+  const [searchError, setSearchError] = useState('')
   const [papers, setPapers] = useState([])
   const [truncated, setTruncated] = useState(false)
   const [total, setTotal] = useState(0)
@@ -14,6 +15,7 @@ export default function App() {
 
   async function handleSearch(kws) {
     setLoading(true)
+    setSearchError('')
     setKeywords(kws)
     try {
       const res = await fetch('/api/search', {
@@ -23,13 +25,16 @@ export default function App() {
       })
       if (!res.ok) {
         const err = await res.json()
-        throw new Error(err.detail || 'Search failed')
+        setSearchError(err.detail || 'Search failed')
+        return
       }
       const data = await res.json()
       setPapers(data.papers)
       setTruncated(data.truncated)
       setTotal(data.total)
       setSelectedIndices(new Set())
+    } catch {
+      setSearchError('Cannot reach backend — make sure it is running on port 8000.')
     } finally {
       setLoading(false)
     }
@@ -40,6 +45,7 @@ export default function App() {
       <h1>IEEE Paper Search</h1>
       <KeywordInput onSearch={handleSearch} loading={loading} />
       {loading && <div className="searching-msg">Searching IEEE Xplore… this may take 10–20 seconds.</div>}
+      {searchError && <div className="error-msg" style={{marginBottom: 12}}>⚠ {searchError}</div>}
       <ResultsTable
         papers={papers}
         truncated={truncated}

@@ -1,9 +1,24 @@
+# Python
 __pycache__/
 *.pyc
 .venv/
 venv/
+backend/venv/
 .pytest_cache/
 *.egg-info/
-.DS_Store
+
+# Node
 node_modules/
 frontend/dist/
+frontend/.vite/
+
+# macOS
+.DS_Store
+
+# Generated files — don't commit downloaded papers or Excel outputs
+*.xlsx
+*.pdf
+
+# Secrets
+.env
+.env.local

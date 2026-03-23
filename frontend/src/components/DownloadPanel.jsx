@@ -21,8 +21,13 @@ export default function DownloadPanel({ selectedPapers, keywords }) {
       setError('Network error — is the backend running?')
       return
     }
-    if (!folderRes.ok) return  // user cancelled (204)
-    const { path } = await folderRes.json()
+    if (!folderRes.ok) {
+      setError('Could not open folder picker — is the backend running?')
+      return
+    }
+    const folderData = await folderRes.json()
+    if (folderData.cancelled || !folderData.path) return  // user cancelled dialog
+    const { path } = folderData
     setDestFolder(path)
 
     // Step 2: start download job
