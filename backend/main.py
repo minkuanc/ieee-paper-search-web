@@ -57,6 +57,20 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/api/choose-folder")
+def choose_folder():
+    import tkinter as tk
+    from tkinter import filedialog
+    root = tk.Tk()
+    root.withdraw()
+    root.wm_attributes("-topmost", 1)
+    folder = filedialog.askdirectory(title="Select destination folder")
+    root.destroy()
+    if not folder:
+        raise HTTPException(status_code=204, detail="No folder selected")
+    return {"path": folder}
+
+
 @app.post("/api/search")
 def api_search(req: SearchRequest):
     kws = [k.strip() for k in req.keywords if k.strip()]

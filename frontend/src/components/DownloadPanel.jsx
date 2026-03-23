@@ -51,6 +51,14 @@ export default function DownloadPanel({ selectedPapers, keywords }) {
     es.onerror = () => { es.close(); setDownloading(false) }
   }
 
+  async function handleBrowse() {
+    const res = await fetch('/api/choose-folder')
+    if (res.ok) {
+      const data = await res.json()
+      setDestFolder(data.path)
+    }
+  }
+
   const canDownload = selectedPapers.length > 0 && destFolder.trim() && !downloading
 
   return (
@@ -63,6 +71,7 @@ export default function DownloadPanel({ selectedPapers, keywords }) {
           placeholder="/Users/you/Downloads"
           className="folder-input"
         />
+        <button onClick={handleBrowse} disabled={downloading} className="btn-secondary">Browse…</button>
         <button onClick={handleDownload} disabled={!canDownload} className="btn-primary">
           {downloading ? 'Downloading…' : `Download Selected (${selectedPapers.length})`}
         </button>
