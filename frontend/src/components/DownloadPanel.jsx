@@ -13,11 +13,17 @@ export default function DownloadPanel({ selectedPapers, keywords }) {
     setSummary(null)
     setProgress(null)
 
-    const res = await fetch('/api/download', {
+    let res
+    try {
+      res = await fetch('/api/download', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ papers: selectedPapers, dest_folder: destFolder, keywords }),
-    })
+      })
+    } catch {
+      setError('Network error — is the backend running?')
+      return
+    }
 
     if (!res.ok) {
       const data = await res.json()
@@ -39,6 +45,7 @@ export default function DownloadPanel({ selectedPapers, keywords }) {
         fetch(`/api/download/${job_id}/status`)
           .then(r => r.json())
           .then(s => setSummary(s))
+          .catch(() => setError('Could not fetch download summary'))
       }
     }
     es.onerror = () => { es.close(); setDownloading(false) }

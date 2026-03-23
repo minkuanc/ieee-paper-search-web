@@ -21,6 +21,10 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ keywords: kws, years_back: 3 }),
       })
+      if (!res.ok) {
+        const err = await res.json()
+        throw new Error(err.detail || 'Search failed')
+      }
       const data = await res.json()
       setPapers(data.papers)
       setTruncated(data.truncated)
