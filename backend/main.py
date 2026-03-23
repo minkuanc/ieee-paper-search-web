@@ -157,17 +157,19 @@ async def api_progress(job_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Job not found")
 
     job = jobs[job_id]
-    last_event_id = request.headers.get("last-event-id")
+    last_event_id = request.headers.get("last-event-id") or request.headers.get("Last-Event-ID")
     replay_from = int(last_event_id) + 1 if last_event_id and last_event_id.isdigit() else 0
 
     async def event_stream():
+        # Snapshot results to get a consistent replay slice and live_idx
+        buffered = list(job["results"])
+        live_idx = len(buffered)
         # Replay buffered events on reconnect
-        for i, event in enumerate(job["results"][replay_from:], start=replay_from):
+        for i, event in enumerate(buffered[replay_from:], start=replay_from):
             yield f"id: {i}\ndata: {json.dumps(event)}\n\n"
             if event.get("done"):
                 return
         # Stream live events
-        live_idx = len(job["results"])
         while True:
             event = await job["queue"].get()
             yield f"id: {live_idx}\ndata: {json.dumps(event)}\n\n"
