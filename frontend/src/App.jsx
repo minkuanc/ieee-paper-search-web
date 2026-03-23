@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import KeywordInput from './components/KeywordInput'
 import ResultsTable from './components/ResultsTable'
+import DownloadPanel from './components/DownloadPanel'
 import './App.css'
 
 export default function App() {
@@ -40,6 +41,10 @@ export default function App() {
         total={total}
         selectedIndices={selectedIndices}
         setSelectedIndices={setSelectedIndices}
+      />
+      <DownloadPanel
+        selectedPapers={papers.filter((_, i) => selectedIndices.has(i))}
+        keywords={keywords}
       />
     </div>
   )
