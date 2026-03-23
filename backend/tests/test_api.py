@@ -1,8 +1,11 @@
+import asyncio
 import tempfile
+import time
+import uuid
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
-from main import app
+from main import app, jobs
 
 client = TestClient(app)
 
@@ -53,3 +56,46 @@ def test_download_valid_folder_returns_job_id():
             })
     assert r.status_code == 200
     assert "job_id" in r.json()
+
+def test_status_unknown_job_returns_404():
+    r = client.get("/api/download/nonexistent-id/status")
+    assert r.status_code == 404
+
+def test_status_done_job():
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {
+        "results": [
+            {"status": "Downloaded", "local_path": "/f/p.pdf", "done": False, "index": 1, "total": 1, "title": "T"},
+            {"status": "Done", "local_path": "", "done": True, "index": 1, "total": 1, "title": ""},
+        ],
+        "root": "/tmp/root",
+        "done": True,
+        "excel_path": "/tmp/root/papers.xlsx",
+        "created_at": time.time(),
+        "papers": [],
+        "queue": asyncio.Queue(),
+    }
+    r = client.get(f"/api/download/{job_id}/status")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["downloaded"] == 1
+    assert data["failed"] == 0
+    assert data["done"] is True
+
+def test_excel_unknown_job_returns_404():
+    r = client.get("/api/download/nonexistent-id/excel")
+    assert r.status_code == 404
+
+def test_excel_job_not_done_returns_425():
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {
+        "results": [],
+        "root": "/tmp/root",
+        "done": False,
+        "excel_path": None,
+        "created_at": time.time(),
+        "papers": [],
+        "queue": asyncio.Queue(),
+    }
+    r = client.get(f"/api/download/{job_id}/excel")
+    assert r.status_code == 425

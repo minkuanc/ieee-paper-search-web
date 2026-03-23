@@ -6,9 +6,11 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+import json
+
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from scraper import search_papers, PDFDownloader
@@ -147,3 +149,62 @@ async def api_download(req: DownloadRequest):
     t = threading.Thread(target=_run_download, args=(job_id, loop), daemon=True)
     t.start()
     return {"job_id": job_id}
+
+
+@app.get("/api/download/{job_id}/progress")
+async def api_progress(job_id: str, request: Request):
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job = jobs[job_id]
+    last_event_id = request.headers.get("last-event-id")
+    replay_from = int(last_event_id) + 1 if last_event_id and last_event_id.isdigit() else 0
+
+    async def event_stream():
+        # Replay buffered events on reconnect
+        for i, event in enumerate(job["results"][replay_from:], start=replay_from):
+            yield f"id: {i}\ndata: {json.dumps(event)}\n\n"
+            if event.get("done"):
+                return
+        # Stream live events
+        live_idx = len(job["results"])
+        while True:
+            event = await job["queue"].get()
+            yield f"id: {live_idx}\ndata: {json.dumps(event)}\n\n"
+            live_idx += 1
+            if event.get("done"):
+                return
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.get("/api/download/{job_id}/status")
+def api_status(job_id: str):
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = jobs[job_id]
+    downloaded = sum(1 for r in job["results"] if r["status"] == "Downloaded")
+    failed = sum(1 for r in job["results"] if r["status"] not in ("Downloaded", "Done"))
+    return {
+        "downloaded": downloaded,
+        "failed": failed,
+        "root_folder": job["root"],
+        "done": job["done"],
+    }
+
+
+@app.get("/api/download/{job_id}/excel")
+def api_excel(job_id: str):
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = jobs[job_id]
+    if not job["done"]:
+        raise HTTPException(status_code=425, detail="Download not yet complete")
+    excel_path = job.get("excel_path")
+    if not excel_path or not os.path.exists(excel_path):
+        raise HTTPException(status_code=404, detail="Excel file not found")
+    return FileResponse(
+        excel_path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename="papers.xlsx",
+    )
