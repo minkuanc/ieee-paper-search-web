@@ -82,13 +82,14 @@ def _fetch_keywords(article_number: str | int, session: requests.Session) -> lis
     return kws
 
 
-def _paper_matches(title: str, ieee_keywords: list[str], input_keywords: list[str]) -> bool:
+def _paper_matches(title: str, ieee_keywords: list[str], abstract: str, input_keywords: list[str]) -> bool:
     """
-    Return True if every input keyword appears in the paper title OR in the
-    fetched IEEE / author keyword list.  Matching is case-insensitive and
-    substring-based ("MIMO" matches "Massive MIMO", etc.).
+    Return True if every input keyword appears in the paper title, the
+    fetched IEEE / author keyword list, OR the abstract.
+    Matching is case-insensitive and substring-based.
     """
     title_lower = title.lower()
+    abstract_lower = abstract.lower()
     kw_blobs = [k.lower() for k in ieee_keywords]
 
     for kw in input_keywords:
@@ -98,6 +99,8 @@ def _paper_matches(title: str, ieee_keywords: list[str], input_keywords: list[st
         if kw_lower in title_lower:
             continue
         if any(kw_lower in blob for blob in kw_blobs):
+            continue
+        if kw_lower in abstract_lower:
             continue
         return False
     return True
@@ -124,7 +127,7 @@ def search_papers(keywords: list[str], start_year: int = 0) -> list[dict]:
         start_year = current_year - 3
     year_range = f"{start_year}_{current_year}_Year"
 
-    # Field-scoped query: every keyword must appear in title OR author keywords
+    # Field-scoped query: every keyword must appear in title, author keywords, OR abstract
     kw_clauses = []
     for kw in keywords:
         kw = kw.strip()
@@ -132,7 +135,7 @@ def search_papers(keywords: list[str], start_year: int = 0) -> list[dict]:
             continue
         quoted = kw.replace('"', '')
         kw_clauses.append(
-            f'(("Document Title":"{quoted}") OR ("Author Keywords":"{quoted}"))'
+            f'(("Document Title":"{quoted}") OR ("Author Keywords":"{quoted}") OR ("Abstract":"{quoted}"))'
         )
     query_text = " AND ".join(kw_clauses) if kw_clauses else ""
 
@@ -197,6 +200,7 @@ def search_papers(keywords: list[str], start_year: int = 0) -> list[dict]:
                 "doi": record.get("doi", ""),
                 "url": url,
                 "pdf_link": record.get("pdfLink", ""),
+                "abstract": record.get("abstract", ""),
             })
 
             if len(raw_papers) >= MAX_RESULTS:
@@ -224,8 +228,7 @@ def search_papers(keywords: list[str], start_year: int = 0) -> list[dict]:
     papers = []
     for p in raw_papers:
         ieee_kws = kw_map.get(p["article_number"], [])
-        # Keep paper only if every input keyword is in title OR fetched keywords
-        if not _paper_matches(p["title"], ieee_kws, keywords):
+        if not _paper_matches(p["title"], ieee_kws, p.get("abstract", ""), keywords):
             continue
         papers.append({
             "title": p["title"],
@@ -236,6 +239,7 @@ def search_papers(keywords: list[str], start_year: int = 0) -> list[dict]:
             "url": p["url"],
             "pdf_link": p["pdf_link"],
             "ieee_keywords": ieee_kws,
+            "abstract": p.get("abstract", ""),
         })
 
     papers.sort(key=lambda p: p["year"], reverse=True)

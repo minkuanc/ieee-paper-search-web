@@ -105,6 +105,7 @@ class PaperItem(BaseModel):
     url: str
     pdf_link: str = ""
     ieee_keywords: list[str] = []
+    abstract: str = ""
 
 
 class DownloadRequest(BaseModel):
