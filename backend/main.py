@@ -49,7 +49,7 @@ app.add_middleware(
 
 class SearchRequest(BaseModel):
     keywords: list[str]
-    years_back: int = 3
+    start_year: int = 0  # 0 = default (current year - 3)
 
 
 @app.get("/health")
@@ -92,7 +92,7 @@ def api_search(req: SearchRequest):
     kws = [k.strip() for k in req.keywords if k.strip()]
     if not kws:
         raise HTTPException(status_code=400, detail="At least one keyword is required")
-    papers, truncated, total = search_papers(kws, req.years_back)
+    papers, truncated, total = search_papers(kws, req.start_year)
     return {"papers": papers, "truncated": truncated, "total": total}
 
 

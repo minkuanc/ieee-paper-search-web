@@ -13,7 +13,7 @@ export default function App() {
   const [selectedIndices, setSelectedIndices] = useState(new Set())
   const [keywords, setKeywords] = useState([])
 
-  async function handleSearch(kws) {
+  async function handleSearch(kws, startYear) {
     setLoading(true)
     setSearchError('')
     setKeywords(kws)
@@ -21,7 +21,7 @@ export default function App() {
       const res = await fetch('/api/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keywords: kws, years_back: 3 }),
+        body: JSON.stringify({ keywords: kws, start_year: startYear }),
       })
       if (!res.ok) {
         const err = await res.json()

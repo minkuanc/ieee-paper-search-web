@@ -103,7 +103,7 @@ def _paper_matches(title: str, ieee_keywords: list[str], input_keywords: list[st
     return True
 
 
-def search_papers(keywords: list[str], years_back: int = 3) -> list[dict]:
+def search_papers(keywords: list[str], start_year: int = 0) -> list[dict]:
     """
     Search IEEE Xplore for papers where every keyword appears in either
     the paper title OR the IEEE/author keyword list.
@@ -120,7 +120,8 @@ def search_papers(keywords: list[str], years_back: int = 3) -> list[dict]:
       - papers     = verified list with ieee_keywords populated, sorted by year
     """
     current_year = datetime.now().year
-    start_year = current_year - years_back
+    if not start_year or start_year <= 0:
+        start_year = current_year - 3
     year_range = f"{start_year}_{current_year}_Year"
 
     # Field-scoped query: every keyword must appear in title OR author keywords
