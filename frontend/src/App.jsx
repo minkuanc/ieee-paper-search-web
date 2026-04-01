@@ -17,6 +17,9 @@ export default function App() {
     setLoading(true)
     setSearchError('')
     setKeywords(kws)
+    setPapers([])
+    setTotal(0)
+    setSelectedIndices(new Set())
     try {
       const res = await fetch('/api/search', {
         method: 'POST',
