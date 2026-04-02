@@ -267,6 +267,13 @@ class PDFDownloader:
     Chrome profile so institutional cookies are reused between runs.
     """
 
+    # Serialise uc.Chrome() construction across all instances.
+    # undetected-chromedriver patches/re-downloads the chromedriver binary on
+    # first use; if multiple threads call uc.Chrome() simultaneously they race
+    # on that file and one or more instances fail to start.  After construction
+    # each driver runs fully independently.
+    _init_lock = __import__("threading").Lock()
+
     def __init__(self, user_data_dir: str | None = None):
         self._driver = None
         self._user_data_dir = user_data_dir or str(
@@ -314,12 +321,14 @@ class PDFDownloader:
         options.add_argument("--disable-dev-shm-usage")
         # Detect Chrome version so uc downloads the matching chromedriver
         version_main = self._chrome_major_version()
-        # non-headless so user can log in on first run
-        self._driver = uc.Chrome(
-            options=options,
-            headless=False,
-            **({"version_main": version_main} if version_main else {}),
-        )
+        # Serialise driver construction to avoid uc patching race condition
+        with PDFDownloader._init_lock:
+            self._driver = uc.Chrome(
+                options=options,
+                headless=False,
+                **({"version_main": version_main} if version_main else {}),
+            )
+            time.sleep(1)   # let the new instance settle before the next one starts
 
     def prepare_session(self) -> tuple[dict, str]:
         """

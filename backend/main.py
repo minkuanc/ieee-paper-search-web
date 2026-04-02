@@ -147,7 +147,7 @@ def _run_download(job_id: str, loop: asyncio.AbstractEventLoop):
     total = len(papers)
     results_lock = threading.Lock()
 
-    N_BROWSERS    = 3   # parallel Chrome windows
+    N_BROWSERS    = 5   # parallel Chrome windows
     N_DOWNLOADERS = 10  # parallel requests download threads
 
     # paper_queue: (idx, paper) tuples consumed by browser threads
