@@ -17,8 +17,8 @@ import requests
 
 SEARCH_URL = "https://ieeexplore.ieee.org/rest/search"
 BASE_URL = "https://ieeexplore.ieee.org"
-ROWS_PER_PAGE = 25
-MAX_RESULTS = 200
+ROWS_PER_PAGE = 100
+MAX_RESULTS = 600
 
 
 def _sanitize_filename(title: str) -> str:
@@ -217,7 +217,7 @@ def search_papers(keywords: list[str], start_year: int = 0) -> list[dict]:
     def _fetch(art_num: str) -> tuple[str, list[str]]:
         return art_num, _fetch_keywords(art_num, session)
 
-    with ThreadPoolExecutor(max_workers=10) as pool:
+    with ThreadPoolExecutor(max_workers=20) as pool:
         futures = {pool.submit(_fetch, p["article_number"]): p["article_number"]
                    for p in raw_papers if p["article_number"]}
         for fut in as_completed(futures):
@@ -306,6 +306,65 @@ class PDFDownloader:
             headless=False,
             **({"version_main": version_main} if version_main else {}),
         )
+
+    def prepare_session(self) -> tuple[dict, str]:
+        """
+        Navigate to IEEE Xplore once to establish an institutional session.
+        Returns (cookies_dict, user_agent) for reuse in direct downloads.
+        """
+        self._ensure_driver()
+        self._driver.get(BASE_URL + "/")
+        time.sleep(2)
+        cookies = {c["name"]: c["value"] for c in self._driver.get_cookies()}
+        ua = self._driver.execute_script("return navigator.userAgent;")
+        return cookies, ua
+
+    def download_direct(
+        self, paper: dict, dest_folder: str, cookies: dict, ua: str
+    ) -> tuple[str, str]:
+        """
+        Fast path: download the PDF directly using the pdfLink URL from search
+        results plus the pre-fetched session cookies.  No browser navigation
+        required, so multiple papers can download in parallel.
+
+        Returns (local_path, status) — local_path is "" on failure so the
+        caller can fall back to the browser-based download() method.
+        """
+        pdf_link = paper.get("pdf_link", "")
+        if not pdf_link:
+            return "", "No direct PDF link"
+
+        pdf_url = BASE_URL + pdf_link if pdf_link.startswith("/") else pdf_link
+        year_folder = os.path.join(dest_folder, str(paper["year"]))
+        os.makedirs(year_folder, exist_ok=True)
+
+        try:
+            resp = requests.get(
+                pdf_url,
+                cookies=cookies,
+                headers={
+                    "User-Agent": ua,
+                    "Referer": BASE_URL + "/",
+                    "Accept": "application/pdf,*/*",
+                },
+                timeout=60,
+                stream=True,
+            )
+            ct = resp.headers.get("content-type", "")
+            if resp.status_code == 200 and "pdf" in ct.lower():
+                filename = _sanitize_filename(paper["title"])
+                filepath = os.path.join(year_folder, filename)
+                with open(filepath, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=65536):
+                        if chunk:
+                            f.write(chunk)
+                print(f"[PDFDownloader] Direct download OK: {filename[:60]}")
+                return filepath, "Downloaded"
+            print(f"[PDFDownloader] Direct download failed: HTTP {resp.status_code} {ct}")
+            return "", f"Direct failed: HTTP {resp.status_code}"
+        except Exception as exc:
+            print(f"[PDFDownloader] Direct download error: {exc}")
+            return "", f"Direct error: {exc}"
 
     def download(self, paper: dict, dest_folder: str) -> tuple[str, str]:
         """

@@ -4,6 +4,7 @@ import re
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 
 import json
@@ -119,13 +120,38 @@ def _sanitize_folder_name(kw: str) -> str:
 
 
 def _run_download(job_id: str, loop: asyncio.AbstractEventLoop):
-    """Background thread: download each paper and push SSE events."""
+    """
+    Background thread: download papers in parallel and push SSE progress events.
+
+    Strategy:
+      1. Use the browser once to establish an IEEE session and grab cookies.
+      2. Attempt each PDF via a direct requests download (fast, parallelisable).
+      3. Any paper whose direct download fails falls back to the full browser
+         navigation path (serialised with a lock to avoid Selenium conflicts).
+    """
     job = jobs[job_id]
     downloader = PDFDownloader()
-    total = len(job["papers"])
+    papers = job["papers"]
+    total = len(papers)
+    results_lock = threading.Lock()
+    browser_lock = threading.Lock()   # serialise Selenium fallback calls
+
     try:
-        for idx, paper in enumerate(job["papers"]):
-            local_path, status = downloader.download(paper, job["root"])
+        # ── Step 1: one browser visit to get session cookies ─────────────────
+        cookies, ua = downloader.prepare_session()
+
+        # ── Step 2: parallel downloads ────────────────────────────────────────
+        def _download_one(idx_paper):
+            idx, paper = idx_paper
+            # Fast path: direct HTTP download using session cookies
+            local_path, status = downloader.download_direct(
+                paper, job["root"], cookies, ua
+            )
+            # Slow path: full browser navigation (serialised)
+            if not local_path:
+                with browser_lock:
+                    local_path, status = downloader.download(paper, job["root"])
+
             event = {
                 "index": idx + 1,
                 "total": total,
@@ -134,18 +160,28 @@ def _run_download(job_id: str, loop: asyncio.AbstractEventLoop):
                 "local_path": local_path,
                 "done": False,
             }
-            job["results"].append(event)
+            with results_lock:
+                job["results"].append(event)
             loop.call_soon_threadsafe(job["queue"].put_nowait, event)
-        # Write Excel
+
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            list(pool.map(_download_one, enumerate(papers)))
+
+        # ── Step 3: write Excel (sort results back into paper order) ──────────
+        job["results"].sort(key=lambda e: e["index"])
         excel_path = os.path.join(job["root"], "papers.xlsx")
         writer = ExcelWriter(excel_path)
         writer.append_papers([
-            {**job["papers"][i], "local_path": e["local_path"], "status": e["status"]}
-            for i, e in enumerate(job["results"])
+            {**papers[e["index"] - 1], "local_path": e["local_path"], "status": e["status"]}
+            for e in job["results"]
         ])
         writer.save()
         job["excel_path"] = excel_path
-        terminal_event = {"index": total, "total": total, "title": "", "status": "Done", "local_path": "", "done": True}
+
+        terminal_event = {
+            "index": total, "total": total,
+            "title": "", "status": "Done", "local_path": "", "done": True,
+        }
         job["results"].append(terminal_event)
         loop.call_soon_threadsafe(job["queue"].put_nowait, terminal_event)
     finally:
