@@ -123,49 +123,78 @@ def _sanitize_folder_name(kw: str) -> str:
 
 def _run_download(job_id: str, loop: asyncio.AbstractEventLoop):
     """
-    Producer-consumer pipeline for parallel PDF downloads.
+    Multi-browser producer-consumer pipeline for parallel PDF downloads.
 
-    One browser thread (producer) navigates IEEE sequentially to extract the
-    actual PDF CDN URL for each paper, then 10 download threads (consumers)
-    save the files in parallel via requests — fully overlapping with browser
-    navigation for the next paper.
+    Architecture:
+      N_BROWSERS Chrome instances each pick papers from a shared paper_queue,
+      navigate to extract the real PDF CDN URL, then put the result into
+      url_queue.  N_DOWNLOADERS worker threads consume url_queue and save
+      files via requests — all in parallel.
 
-    Stop works by setting job["stop_requested"] = True:
-      - The producer skips browser navigation and emits "Stopped" tokens.
-      - Consumer threads skip the requests download for those tokens.
-      - Papers already in-flight finish; no new ones start.
+      Timeline (N_BROWSERS=3, N_DOWNLOADERS=10):
+        t=0   browsers 0,1,2 start navigating papers 0,1,2
+        t=5s  each browser gets PDF URL → download workers start saving
+              browser immediately picks next paper (0→3, 1→4, 2→5)
+        → 3 papers navigating + up to 10 downloading simultaneously
+
+    Stop:
+      browser_producer checks stop_requested before each paper;
+      skips browser navigation and emits empty-URL tokens that workers
+      convert to "Stopped" events instantly.
     """
     job = jobs[job_id]
-    downloader = PDFDownloader()
     papers = job["papers"]
     total = len(papers)
     results_lock = threading.Lock()
-    N_WORKERS = 10
 
-    # url_queue items: (idx, paper, pdf_url, cookies, ua)
-    # None = sentinel (one per worker thread)
-    url_queue: _queue.Queue = _queue.Queue(maxsize=N_WORKERS * 2)
+    N_BROWSERS    = 3   # parallel Chrome windows
+    N_DOWNLOADERS = 10  # parallel requests download threads
+
+    # paper_queue: (idx, paper) tuples consumed by browser threads
+    paper_queue: _queue.Queue = _queue.Queue()
+    for idx, paper in enumerate(papers):
+        paper_queue.put((idx, paper))
+
+    # url_queue: (idx, paper, pdf_url, cookies, ua) consumed by download workers
+    url_queue: _queue.Queue = _queue.Queue(maxsize=N_DOWNLOADERS * 2)
+
+    # Keep refs so we can close browsers in finally
+    downloaders: list[PDFDownloader] = []
+    downloaders_lock = threading.Lock()
 
     try:
-        def browser_producer():
-            """Runs in its own thread; owns the Selenium driver."""
+        def browser_producer(browser_id: int):
+            profile_dir = os.path.join(
+                os.path.expanduser("~"), ".ieee_search_app",
+                f"chrome_profile_{browser_id}"
+            )
+            dl = PDFDownloader(user_data_dir=profile_dir)
+            with downloaders_lock:
+                downloaders.append(dl)
             try:
-                for idx, paper in enumerate(papers):
+                while True:
+                    try:
+                        idx, paper = paper_queue.get_nowait()
+                    except _queue.Empty:
+                        break
                     if job["stop_requested"]:
-                        # Drain remaining with empty URL so workers emit Stopped
-                        for rem_idx, rem_paper in [(idx, paper)] + list(enumerate(papers[idx + 1:], start=idx + 1)):
-                            url_queue.put((rem_idx, rem_paper, "", {}, ""))
-                        return
-                    pdf_url, cookies, ua = downloader.get_pdf_url(paper)
+                        url_queue.put((idx, paper, "", {}, "Stopped"))
+                        # Drain the rest of the paper_queue
+                        while True:
+                            try:
+                                rem_idx, rem_paper = paper_queue.get_nowait()
+                                url_queue.put((rem_idx, rem_paper, "", {}, "Stopped"))
+                            except _queue.Empty:
+                                break
+                        break
+                    pdf_url, cookies, ua = dl.get_pdf_url(paper)
                     url_queue.put((idx, paper, pdf_url, cookies, ua))
             except Exception as exc:
-                print(f"[producer] unexpected error: {exc}")
+                print(f"[browser {browser_id}] error: {exc}")
             finally:
-                for _ in range(N_WORKERS):
-                    url_queue.put(None)  # sentinel per worker
+                dl.close()
 
         def download_worker():
-            """Runs in thread pool; calls save_pdf (thread-safe)."""
             while True:
                 item = url_queue.get()
                 if item is None:
@@ -173,7 +202,7 @@ def _run_download(job_id: str, loop: asyncio.AbstractEventLoop):
                 idx, paper, pdf_url, cookies, ua = item
 
                 if job["stop_requested"] or not pdf_url:
-                    status = "Stopped" if job["stop_requested"] else f"No PDF URL: {ua}"
+                    status = "Stopped"
                     local_path = ""
                 else:
                     local_path, status = PDFDownloader.save_pdf(
@@ -192,17 +221,31 @@ def _run_download(job_id: str, loop: asyncio.AbstractEventLoop):
                     job["results"].append(event)
                 loop.call_soon_threadsafe(job["queue"].put_nowait, event)
 
-        # Start browser producer in its own thread
-        producer_thread = threading.Thread(target=browser_producer, daemon=True)
-        producer_thread.start()
+        # Start N_BROWSERS browser threads
+        browser_threads = [
+            threading.Thread(target=browser_producer, args=(i,), daemon=True)
+            for i in range(min(N_BROWSERS, total))
+        ]
+        for t in browser_threads:
+            t.start()
 
-        # Run download workers in thread pool
-        with ThreadPoolExecutor(max_workers=N_WORKERS) as pool:
-            futures = [pool.submit(download_worker) for _ in range(N_WORKERS)]
+        # When all browsers finish, send sentinels to download workers
+        def _wait_then_signal():
+            for t in browser_threads:
+                t.join()
+            for _ in range(N_DOWNLOADERS):
+                url_queue.put(None)
+
+        signal_thread = threading.Thread(target=_wait_then_signal, daemon=True)
+        signal_thread.start()
+
+        # Run download workers
+        with ThreadPoolExecutor(max_workers=N_DOWNLOADERS) as pool:
+            futures = [pool.submit(download_worker) for _ in range(N_DOWNLOADERS)]
             for f in futures:
                 f.result()
 
-        producer_thread.join(timeout=10)
+        signal_thread.join(timeout=10)
 
         # Write Excel (sort by paper index to preserve original order)
         job["results"].sort(key=lambda e: e["index"])
