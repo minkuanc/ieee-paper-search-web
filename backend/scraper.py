@@ -201,6 +201,7 @@ def search_papers(keywords: list[str], start_year: int = 0) -> list[dict]:
                 "url": url,
                 "pdf_link": record.get("pdfLink", ""),
                 "abstract": record.get("abstract", ""),
+                "content_type": record.get("contentType", ""),
             })
 
             if len(raw_papers) >= MAX_RESULTS:
@@ -240,6 +241,7 @@ def search_papers(keywords: list[str], start_year: int = 0) -> list[dict]:
             "pdf_link": p["pdf_link"],
             "ieee_keywords": ieee_kws,
             "abstract": p.get("abstract", ""),
+            "content_type": p.get("content_type", ""),
         })
 
     papers.sort(key=lambda p: p["year"], reverse=True)
@@ -320,12 +322,17 @@ class PDFDownloader:
         return cookies, ua
 
     def download_direct(
-        self, paper: dict, dest_folder: str, cookies: dict, ua: str
+        self, paper: dict, dest_folder: str, browser_cookies: dict, browser_ua: str
     ) -> tuple[str, str]:
         """
         Fast path: download the PDF directly using the pdfLink URL from search
-        results plus the pre-fetched session cookies.  No browser navigation
-        required, so multiple papers can download in parallel.
+        results without any browser navigation, so N papers can download in
+        parallel across threads.
+
+        Two attempts are made:
+          1. Fresh requests Session seeded from the IEEE homepage (institution
+             IP-based access — no browser required).
+          2. The pre-fetched browser session cookies as a fallback.
 
         Returns (local_path, status) — local_path is "" on failure so the
         caller can fall back to the browser-based download() method.
@@ -337,34 +344,46 @@ class PDFDownloader:
         pdf_url = BASE_URL + pdf_link if pdf_link.startswith("/") else pdf_link
         year_folder = os.path.join(dest_folder, str(paper["year"]))
         os.makedirs(year_folder, exist_ok=True)
+        filename = _sanitize_filename(paper["title"])
+        filepath = os.path.join(year_folder, filename)
 
-        try:
-            resp = requests.get(
-                pdf_url,
-                cookies=cookies,
-                headers={
-                    "User-Agent": ua,
-                    "Referer": BASE_URL + "/",
-                    "Accept": "application/pdf,*/*",
-                },
-                timeout=60,
-                stream=True,
-            )
-            ct = resp.headers.get("content-type", "")
-            if resp.status_code == 200 and "pdf" in ct.lower():
-                filename = _sanitize_filename(paper["title"])
-                filepath = os.path.join(year_folder, filename)
-                with open(filepath, "wb") as f:
-                    for chunk in resp.iter_content(chunk_size=65536):
-                        if chunk:
-                            f.write(chunk)
-                print(f"[PDFDownloader] Direct download OK: {filename[:60]}")
-                return filepath, "Downloaded"
-            print(f"[PDFDownloader] Direct download failed: HTTP {resp.status_code} {ct}")
-            return "", f"Direct failed: HTTP {resp.status_code}"
-        except Exception as exc:
-            print(f"[PDFDownloader] Direct download error: {exc}")
-            return "", f"Direct error: {exc}"
+        def _try_download(sess_cookies: dict | None, ua: str) -> bool:
+            """Return True and write file on success, False otherwise."""
+            try:
+                resp = requests.get(
+                    pdf_url,
+                    cookies=sess_cookies,
+                    headers={
+                        "User-Agent": ua,
+                        "Referer": BASE_URL + "/",
+                        "Accept": "application/pdf,*/*",
+                    },
+                    timeout=60,
+                    stream=True,
+                )
+                ct = resp.headers.get("content-type", "")
+                if resp.status_code == 200 and "pdf" in ct.lower():
+                    with open(filepath, "wb") as f:
+                        for chunk in resp.iter_content(chunk_size=65536):
+                            if chunk:
+                                f.write(chunk)
+                    print(f"[PDFDownloader] Direct OK: {filename[:70]}")
+                    return True
+                print(f"[PDFDownloader] Direct failed: HTTP {resp.status_code} {ct[:50]}")
+            except Exception as exc:
+                print(f"[PDFDownloader] Direct error: {exc}")
+            return False
+
+        # Attempt 1: fresh IP-based session (each thread gets its own session)
+        ip_session = _make_session()
+        if _try_download(dict(ip_session.cookies), ip_session.headers["User-Agent"]):
+            return filepath, "Downloaded"
+
+        # Attempt 2: browser session cookies
+        if _try_download(browser_cookies, browser_ua):
+            return filepath, "Downloaded"
+
+        return "", "Direct download failed"
 
     def download(self, paper: dict, dest_folder: str) -> tuple[str, str]:
         """

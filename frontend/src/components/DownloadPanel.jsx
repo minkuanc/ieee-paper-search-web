@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 
 export default function DownloadPanel({ selectedPapers, keywords }) {
   const [error, setError] = useState('')
@@ -7,6 +7,7 @@ export default function DownloadPanel({ selectedPapers, keywords }) {
   const [summary, setSummary] = useState(null)
   const [downloading, setDownloading] = useState(false)
   const [destFolder, setDestFolder] = useState('')
+  const esRef = useRef(null)
 
   async function handleDownload() {
     setError('')
@@ -26,7 +27,7 @@ export default function DownloadPanel({ selectedPapers, keywords }) {
       return
     }
     const folderData = await folderRes.json()
-    if (folderData.cancelled || !folderData.path) return  // user cancelled dialog
+    if (folderData.cancelled || !folderData.path) return
     const { path } = folderData
     setDestFolder(path)
 
@@ -55,11 +56,14 @@ export default function DownloadPanel({ selectedPapers, keywords }) {
 
     // Step 3: stream SSE progress
     const es = new EventSource(`/api/download/${job_id}/progress`)
+    esRef.current = es
+
     es.onmessage = e => {
       const event = JSON.parse(e.data)
       if (!event.done) setProgress(event)
       if (event.done) {
         es.close()
+        esRef.current = null
         setDownloading(false)
         fetch(`/api/download/${job_id}/status`)
           .then(r => r.json())
@@ -67,7 +71,16 @@ export default function DownloadPanel({ selectedPapers, keywords }) {
           .catch(() => setError('Could not fetch download summary'))
       }
     }
-    es.onerror = () => { es.close(); setDownloading(false) }
+    es.onerror = () => { es.close(); esRef.current = null; setDownloading(false) }
+  }
+
+  async function handleStop() {
+    if (!jobId) return
+    try {
+      await fetch(`/api/download/${jobId}/stop`, { method: 'POST' })
+    } catch {
+      // ignore network errors — the flag is set server-side
+    }
   }
 
   const canDownload = selectedPapers.length > 0 && !downloading
@@ -79,6 +92,11 @@ export default function DownloadPanel({ selectedPapers, keywords }) {
         <button onClick={handleDownload} disabled={!canDownload} className="btn-primary">
           {downloading ? 'Downloading…' : `Download Selected (${selectedPapers.length})`}
         </button>
+        {downloading && (
+          <button onClick={handleStop} className="btn-stop">
+            ■ Stop
+          </button>
+        )}
       </div>
 
       {error && <div className="error-msg">⚠ {error}</div>}
@@ -100,7 +118,8 @@ export default function DownloadPanel({ selectedPapers, keywords }) {
 
       {summary && (
         <div className="summary">
-          ✓ {summary.downloaded} downloaded, {summary.failed} failed.{' '}
+          {summary.stopped ? '⏹ Stopped — ' : '✓ '}
+          {summary.downloaded} downloaded, {summary.failed} failed.{' '}
           <a href={`/api/download/${jobId}/excel`} download="papers.xlsx" className="excel-link">
             Download Excel
           </a>

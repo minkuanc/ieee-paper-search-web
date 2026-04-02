@@ -107,6 +107,7 @@ class PaperItem(BaseModel):
     pdf_link: str = ""
     ieee_keywords: list[str] = []
     abstract: str = ""
+    content_type: str = ""
 
 
 class DownloadRequest(BaseModel):
@@ -125,25 +126,41 @@ def _run_download(job_id: str, loop: asyncio.AbstractEventLoop):
 
     Strategy:
       1. Use the browser once to establish an IEEE session and grab cookies.
-      2. Attempt each PDF via a direct requests download (fast, parallelisable).
-      3. Any paper whose direct download fails falls back to the full browser
-         navigation path (serialised with a lock to avoid Selenium conflicts).
+      2. Each of 10 worker threads tries a direct requests download first
+         (IP-based session — no browser navigation needed per paper).
+      3. If direct download fails, the worker falls back to full browser
+         navigation (serialised with a lock to avoid Selenium conflicts).
+      4. Checks stop_requested before starting each paper; skipped papers
+         emit a "Stopped" event so the progress bar stays accurate.
     """
     job = jobs[job_id]
     downloader = PDFDownloader()
     papers = job["papers"]
     total = len(papers)
     results_lock = threading.Lock()
-    browser_lock = threading.Lock()   # serialise Selenium fallback calls
+    browser_lock = threading.Lock()
 
     try:
         # ── Step 1: one browser visit to get session cookies ─────────────────
         cookies, ua = downloader.prepare_session()
 
-        # ── Step 2: parallel downloads ────────────────────────────────────────
+        # ── Step 2: parallel downloads (10 workers) ───────────────────────────
         def _download_one(idx_paper):
             idx, paper = idx_paper
-            # Fast path: direct HTTP download using session cookies
+
+            # Honour stop request — emit a Stopped event and skip download
+            if job["stop_requested"]:
+                event = {
+                    "index": idx + 1, "total": total,
+                    "title": paper["title"], "status": "Stopped",
+                    "local_path": "", "done": False,
+                }
+                with results_lock:
+                    job["results"].append(event)
+                loop.call_soon_threadsafe(job["queue"].put_nowait, event)
+                return
+
+            # Fast path: direct HTTP (each thread creates its own requests session)
             local_path, status = downloader.download_direct(
                 paper, job["root"], cookies, ua
             )
@@ -153,18 +170,15 @@ def _run_download(job_id: str, loop: asyncio.AbstractEventLoop):
                     local_path, status = downloader.download(paper, job["root"])
 
             event = {
-                "index": idx + 1,
-                "total": total,
-                "title": paper["title"],
-                "status": status,
-                "local_path": local_path,
-                "done": False,
+                "index": idx + 1, "total": total,
+                "title": paper["title"], "status": status,
+                "local_path": local_path, "done": False,
             }
             with results_lock:
                 job["results"].append(event)
             loop.call_soon_threadsafe(job["queue"].put_nowait, event)
 
-        with ThreadPoolExecutor(max_workers=5) as pool:
+        with ThreadPoolExecutor(max_workers=10) as pool:
             list(pool.map(_download_one, enumerate(papers)))
 
         # ── Step 3: write Excel (sort results back into paper order) ──────────
@@ -174,13 +188,16 @@ def _run_download(job_id: str, loop: asyncio.AbstractEventLoop):
         writer.append_papers([
             {**papers[e["index"] - 1], "local_path": e["local_path"], "status": e["status"]}
             for e in job["results"]
+            if not e.get("done")
         ])
         writer.save()
         job["excel_path"] = excel_path
 
+        stopped = job["stop_requested"]
         terminal_event = {
             "index": total, "total": total,
-            "title": "", "status": "Done", "local_path": "", "done": True,
+            "title": "", "status": "Stopped" if stopped else "Done",
+            "local_path": "", "done": True,
         }
         job["results"].append(terminal_event)
         loop.call_soon_threadsafe(job["queue"].put_nowait, terminal_event)
@@ -210,6 +227,7 @@ async def api_download(req: DownloadRequest):
         "results": [],
         "queue": asyncio.Queue(),
         "done": False,
+        "stop_requested": False,
         "excel_path": None,
         "created_at": time.time(),
     }
@@ -248,16 +266,26 @@ async def api_progress(job_id: str, request: Request):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+@app.post("/api/download/{job_id}/stop")
+def api_stop(job_id: str):
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    jobs[job_id]["stop_requested"] = True
+    return {"ok": True}
+
+
 @app.get("/api/download/{job_id}/status")
 def api_status(job_id: str):
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
     job = jobs[job_id]
     downloaded = sum(1 for r in job["results"] if r["status"] == "Downloaded")
-    failed = sum(1 for r in job["results"] if r["status"] not in ("Downloaded", "Done"))
+    failed = sum(1 for r in job["results"] if r["status"] not in ("Downloaded", "Stopped", "Done"))
+    stopped = job.get("stop_requested", False)
     return {
         "downloaded": downloaded,
         "failed": failed,
+        "stopped": stopped,
         "root_folder": job["root"],
         "done": job["done"],
     }
