@@ -4,6 +4,7 @@ import re
 import threading
 import time
 import uuid
+import queue as _queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 
@@ -122,66 +123,88 @@ def _sanitize_folder_name(kw: str) -> str:
 
 def _run_download(job_id: str, loop: asyncio.AbstractEventLoop):
     """
-    Background thread: download papers in parallel and push SSE progress events.
+    Producer-consumer pipeline for parallel PDF downloads.
 
-    Strategy:
-      1. Use the browser once to establish an IEEE session and grab cookies.
-      2. Each of 10 worker threads tries a direct requests download first
-         (IP-based session — no browser navigation needed per paper).
-      3. If direct download fails, the worker falls back to full browser
-         navigation (serialised with a lock to avoid Selenium conflicts).
-      4. Checks stop_requested before starting each paper; skipped papers
-         emit a "Stopped" event so the progress bar stays accurate.
+    One browser thread (producer) navigates IEEE sequentially to extract the
+    actual PDF CDN URL for each paper, then 10 download threads (consumers)
+    save the files in parallel via requests — fully overlapping with browser
+    navigation for the next paper.
+
+    Stop works by setting job["stop_requested"] = True:
+      - The producer skips browser navigation and emits "Stopped" tokens.
+      - Consumer threads skip the requests download for those tokens.
+      - Papers already in-flight finish; no new ones start.
     """
     job = jobs[job_id]
     downloader = PDFDownloader()
     papers = job["papers"]
     total = len(papers)
     results_lock = threading.Lock()
-    browser_lock = threading.Lock()
+    N_WORKERS = 10
+
+    # url_queue items: (idx, paper, pdf_url, cookies, ua)
+    # None = sentinel (one per worker thread)
+    url_queue: _queue.Queue = _queue.Queue(maxsize=N_WORKERS * 2)
 
     try:
-        # ── Step 1: one browser visit to get session cookies ─────────────────
-        cookies, ua = downloader.prepare_session()
+        def browser_producer():
+            """Runs in its own thread; owns the Selenium driver."""
+            try:
+                for idx, paper in enumerate(papers):
+                    if job["stop_requested"]:
+                        # Drain remaining with empty URL so workers emit Stopped
+                        for rem_idx, rem_paper in [(idx, paper)] + list(enumerate(papers[idx + 1:], start=idx + 1)):
+                            url_queue.put((rem_idx, rem_paper, "", {}, ""))
+                        return
+                    pdf_url, cookies, ua = downloader.get_pdf_url(paper)
+                    url_queue.put((idx, paper, pdf_url, cookies, ua))
+            except Exception as exc:
+                print(f"[producer] unexpected error: {exc}")
+            finally:
+                for _ in range(N_WORKERS):
+                    url_queue.put(None)  # sentinel per worker
 
-        # ── Step 2: parallel downloads (10 workers) ───────────────────────────
-        def _download_one(idx_paper):
-            idx, paper = idx_paper
+        def download_worker():
+            """Runs in thread pool; calls save_pdf (thread-safe)."""
+            while True:
+                item = url_queue.get()
+                if item is None:
+                    break
+                idx, paper, pdf_url, cookies, ua = item
 
-            # Honour stop request — emit a Stopped event and skip download
-            if job["stop_requested"]:
+                if job["stop_requested"] or not pdf_url:
+                    status = "Stopped" if job["stop_requested"] else f"No PDF URL: {ua}"
+                    local_path = ""
+                else:
+                    local_path, status = PDFDownloader.save_pdf(
+                        pdf_url, paper, job["root"], cookies, ua
+                    )
+
                 event = {
-                    "index": idx + 1, "total": total,
-                    "title": paper["title"], "status": "Stopped",
-                    "local_path": "", "done": False,
+                    "index": idx + 1,
+                    "total": total,
+                    "title": paper["title"],
+                    "status": status,
+                    "local_path": local_path,
+                    "done": False,
                 }
                 with results_lock:
                     job["results"].append(event)
                 loop.call_soon_threadsafe(job["queue"].put_nowait, event)
-                return
 
-            # Fast path: direct HTTP (each thread creates its own requests session)
-            local_path, status = downloader.download_direct(
-                paper, job["root"], cookies, ua
-            )
-            # Slow path: full browser navigation (serialised)
-            if not local_path:
-                with browser_lock:
-                    local_path, status = downloader.download(paper, job["root"])
+        # Start browser producer in its own thread
+        producer_thread = threading.Thread(target=browser_producer, daemon=True)
+        producer_thread.start()
 
-            event = {
-                "index": idx + 1, "total": total,
-                "title": paper["title"], "status": status,
-                "local_path": local_path, "done": False,
-            }
-            with results_lock:
-                job["results"].append(event)
-            loop.call_soon_threadsafe(job["queue"].put_nowait, event)
+        # Run download workers in thread pool
+        with ThreadPoolExecutor(max_workers=N_WORKERS) as pool:
+            futures = [pool.submit(download_worker) for _ in range(N_WORKERS)]
+            for f in futures:
+                f.result()
 
-        with ThreadPoolExecutor(max_workers=10) as pool:
-            list(pool.map(_download_one, enumerate(papers)))
+        producer_thread.join(timeout=10)
 
-        # ── Step 3: write Excel (sort results back into paper order) ──────────
+        # Write Excel (sort by paper index to preserve original order)
         job["results"].sort(key=lambda e: e["index"])
         excel_path = os.path.join(job["root"], "papers.xlsx")
         writer = ExcelWriter(excel_path)

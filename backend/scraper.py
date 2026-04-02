@@ -106,6 +106,18 @@ def _paper_matches(title: str, ieee_keywords: list[str], abstract: str, input_ke
     return True
 
 
+def _normalize_content_type(record: dict) -> str:
+    """Return 'journal', 'conference', or 'other' from a raw IEEE search record."""
+    ct = record.get("contentType", "").lower()
+    if (record.get("isJournal") or record.get("isMagazine")
+            or "journal" in ct or "early access" in ct
+            or "periodical" in ct or "magazine" in ct or "transaction" in ct):
+        return "journal"
+    if record.get("isConference") or "conference" in ct:
+        return "conference"
+    return "other"
+
+
 def search_papers(keywords: list[str], start_year: int = 0) -> list[dict]:
     """
     Search IEEE Xplore for papers where every keyword appears in either
@@ -201,7 +213,7 @@ def search_papers(keywords: list[str], start_year: int = 0) -> list[dict]:
                 "url": url,
                 "pdf_link": record.get("pdfLink", ""),
                 "abstract": record.get("abstract", ""),
-                "content_type": record.get("contentType", ""),
+                "content_type": _normalize_content_type(record),
             })
 
             if len(raw_papers) >= MAX_RESULTS:
@@ -385,26 +397,21 @@ class PDFDownloader:
 
         return "", "Direct download failed"
 
-    def download(self, paper: dict, dest_folder: str) -> tuple[str, str]:
+    def get_pdf_url(self, paper: dict) -> tuple[str, dict, str]:
         """
-        Download the PDF for `paper` into `<dest_folder>/<year>/`.
+        Browser-based navigation to extract the actual PDF CDN URL for a paper.
+        Must be called from the thread that owns self._driver (not thread-safe).
 
-        Flow:
-          1. Navigate to paper page; find and follow the PDF icon link
-             (leads to /stamp/stamp.jsp viewer page)
-          2. On the viewer page, extract the actual PDF URL from the <iframe>
-          3. Download that URL via requests using the browser's session cookies
-
-        Returns (local_path, status) where local_path is "" on failure.
+        Returns (pdf_url, cookies_dict, user_agent).  pdf_url is "" on failure.
         """
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support.ui import WebDriverWait
         from selenium.webdriver.support import expected_conditions as EC
 
-        # If the previous Chrome session died (e.g. user closed window), reset it.
+        # Liveness check — reset dead driver
         if self._driver is not None:
             try:
-                _ = self._driver.current_url  # cheap liveness check
+                _ = self._driver.current_url
             except Exception:
                 try:
                     self._driver.quit()
@@ -415,26 +422,21 @@ class PDFDownloader:
         self._ensure_driver()
         driver = self._driver
 
-        year_folder = os.path.join(dest_folder, str(paper["year"]))
-        os.makedirs(year_folder, exist_ok=True)
-
         # ── Step 1: Navigate to the paper page ───────────────────────────────
         try:
             driver.get(paper["url"])
             time.sleep(2)
         except Exception as exc:
-            return ("", f"Navigation failed: {exc}")
+            return "", {}, f"Navigation failed: {exc}"
 
-        # ── Step 2: Find the PDF button URL ───────────────────────────────────
+        # ── Step 2: Find the PDF button → stamp.jsp URL ───────────────────────
         stamp_url = None
-
-        _pdf_selectors = [
+        for sel in [
             "a.stats-document-lh-action-downloadPdf_2",
             "a[href*='/stamp/stamp.jsp']",
             "a.btn-pdf",
             "a[href*='/pdf/']",
-        ]
-        for sel in _pdf_selectors:
+        ]:
             try:
                 el = WebDriverWait(driver, 5).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, sel))
@@ -442,12 +444,11 @@ class PDFDownloader:
                 href = el.get_attribute("href")
                 if href:
                     stamp_url = href
-                    print(f"[PDFDownloader] PDF button found ({sel}): {href[:80]}")
+                    print(f"[PDFDownloader] PDF button ({sel}): {href[:80]}")
                     break
             except Exception:
                 continue
 
-        # Fall back: build stamp URL from pdfLink field or article number in URL
         if not stamp_url:
             pdf_link_field = paper.get("pdf_link", "")
             if pdf_link_field:
@@ -465,21 +466,23 @@ class PDFDownloader:
                     )
 
         if not stamp_url:
-            print(f"[PDFDownloader] No PDF URL found for: {paper['title']!r}")
-            return ("", "No PDF link found on paper page")
+            return "", {}, "No PDF link found on paper page"
 
         # ── Step 3: Navigate to PDF viewer (stamp.jsp) ───────────────────────
         try:
             driver.get(stamp_url)
             time.sleep(3)
         except Exception as exc:
-            return ("", f"PDF viewer navigation failed: {exc}")
+            return "", {}, f"PDF viewer navigation failed: {exc}"
 
         # ── Step 4: Extract actual PDF URL from iframe ────────────────────────
         actual_pdf_url = None
-
-        # Try iframe src first
-        for iframe_sel in ["iframe#pdf-viewer", "iframe[src*='.pdf']", "iframe[src*='iel']", "iframe"]:
+        for iframe_sel in [
+            "iframe#pdf-viewer",
+            "iframe[src*='.pdf']",
+            "iframe[src*='iel']",
+            "iframe",
+        ]:
             try:
                 iframe = WebDriverWait(driver, 8).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, iframe_sel))
@@ -487,56 +490,72 @@ class PDFDownloader:
                 src = iframe.get_attribute("src")
                 if src and src.startswith("http"):
                     actual_pdf_url = src
-                    print(f"[PDFDownloader] PDF iframe src: {src[:80]}")
+                    print(f"[PDFDownloader] iframe src: {src[:80]}")
                     break
             except Exception:
                 continue
 
-        # If no iframe, the browser might have redirected to the raw PDF URL
         if not actual_pdf_url:
             current = driver.current_url
             if ".pdf" in current or "getPDF" in current or "ielx" in current:
                 actual_pdf_url = current
-                print(f"[PDFDownloader] PDF URL from redirect: {current[:80]}")
 
         if not actual_pdf_url:
-            return ("", "Access denied or paywall — PDF viewer did not load")
+            return "", {}, "PDF viewer did not load (access denied?)"
 
-        # ── Step 5: Download using requests + browser session cookies ─────────
         cookies = {c["name"]: c["value"] for c in driver.get_cookies()}
         ua = driver.execute_script("return navigator.userAgent;")
-        dl_headers = {
-            "User-Agent": ua,
-            "Referer": stamp_url,
-            "Accept": "application/pdf,*/*",
-        }
+        return actual_pdf_url, cookies, ua
 
+    @staticmethod
+    def save_pdf(
+        pdf_url: str,
+        paper: dict,
+        dest_folder: str,
+        cookies: dict,
+        ua: str,
+        stamp_url: str = "",
+    ) -> tuple[str, str]:
+        """
+        Thread-safe: download the PDF file via requests using the provided cookies.
+        Can be called from any thread concurrently with other save_pdf() calls.
+
+        Returns (local_path, status).
+        """
+        year_folder = os.path.join(dest_folder, str(paper["year"]))
+        os.makedirs(year_folder, exist_ok=True)
+        filename = _sanitize_filename(paper["title"])
+        filepath = os.path.join(year_folder, filename)
         try:
             resp = requests.get(
-                actual_pdf_url,
+                pdf_url,
                 cookies=cookies,
-                headers=dl_headers,
+                headers={
+                    "User-Agent": ua,
+                    "Referer": stamp_url or BASE_URL + "/",
+                    "Accept": "application/pdf,*/*",
+                },
                 timeout=60,
                 stream=True,
             )
-            content_type = resp.headers.get("content-type", "")
-            if resp.status_code == 200 and "pdf" in content_type.lower():
-                filename = _sanitize_filename(paper["title"])
-                filepath = os.path.join(year_folder, filename)
+            ct = resp.headers.get("content-type", "")
+            if resp.status_code == 200 and "pdf" in ct.lower():
                 with open(filepath, "wb") as f:
-                    for chunk in resp.iter_content(chunk_size=8192):
+                    for chunk in resp.iter_content(chunk_size=65536):
                         if chunk:
                             f.write(chunk)
-                print(f"[PDFDownloader] Saved: {filepath}")
-                return (filepath, "Downloaded")
-            else:
-                return (
-                    "",
-                    f"Download failed: HTTP {resp.status_code}, "
-                    f"content-type={content_type!r}",
-                )
+                print(f"[PDFDownloader] Saved: {filename[:70]}")
+                return filepath, "Downloaded"
+            return "", f"Download failed: HTTP {resp.status_code} {ct[:50]}"
         except Exception as exc:
-            return ("", f"Download request failed: {exc}")
+            return "", f"Download request failed: {exc}"
+
+    def download(self, paper: dict, dest_folder: str) -> tuple[str, str]:
+        """Convenience wrapper: get_pdf_url() then save_pdf() in one call."""
+        pdf_url, cookies, ua = self.get_pdf_url(paper)
+        if not pdf_url:
+            return "", ua  # ua holds the error message on failure
+        return self.save_pdf(pdf_url, paper, dest_folder, cookies, ua)
 
     def close(self):
         if self._driver is not None:

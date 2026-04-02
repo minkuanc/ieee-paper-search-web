@@ -1,9 +1,9 @@
 import { useState } from 'react'
 
 const TYPE_FILTERS = [
-  { label: 'All',         value: 'all' },
-  { label: 'Journals / Transactions', value: 'periodicals' },
-  { label: 'Conferences', value: 'conferences' },
+  { label: 'All',                     value: 'all' },
+  { label: 'Journals / Transactions', value: 'journal' },
+  { label: 'Conferences',             value: 'conference' },
 ]
 
 export default function ResultsTable({ papers, truncated, total, selectedIndices, setSelectedIndices }) {
@@ -14,7 +14,7 @@ export default function ResultsTable({ papers, truncated, total, selectedIndices
   // Apply type filter
   const filtered = typeFilter === 'all'
     ? papers
-    : papers.filter(p => (p.content_type || '').toLowerCase() === typeFilter)
+    : papers.filter(p => (p.content_type || '') === typeFilter)
 
   // Map filtered indices back to original paper indices for selection
   const filteredWithIdx = filtered.map(p => ({ p, origIdx: papers.indexOf(p) }))
