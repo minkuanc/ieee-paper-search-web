@@ -531,7 +531,14 @@ class PDFDownloader:
 
         Returns (local_path, status).
         """
-        year_folder = os.path.join(dest_folder, str(paper["year"]))
+        ct = paper.get("content_type", "other")
+        if ct == "journal":
+            type_folder = "Journal papers"
+        elif ct == "conference":
+            type_folder = "Conference papers"
+        else:
+            type_folder = "Other papers"
+        year_folder = os.path.join(dest_folder, type_folder, str(paper["year"]))
         os.makedirs(year_folder, exist_ok=True)
         filename = _sanitize_filename(paper["title"])
         filepath = os.path.join(year_folder, filename)
